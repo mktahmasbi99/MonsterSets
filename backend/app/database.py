@@ -1,0 +1,837 @@
+from __future__ import annotations
+
+import re
+import sqlite3
+import threading
+import unicodedata
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, date, datetime, time, timedelta
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from pathlib import Path
+
+from .config import Settings
+
+EQUIPMENT = {
+    "resistance_band",
+    "dumbbell",
+    "barbell",
+    "kettlebell",
+    "cable",
+    "weight_machine",
+    "weighted_vest",
+    "weight_plate",
+    "ankle_weights",
+    "sandbag",
+    "other",
+}
+
+SEED_EXERCISES = (
+    ("squats", "Squats", "repetitions", "bodyweight", None, "bodyweight-squat"),
+    ("push-ups", "Push-ups", "repetitions", "bodyweight", None, "push-up"),
+    ("pull-ups", "Pull-ups", "repetitions", "bodyweight", None, "pull-up"),
+    ("bicep-curls", "Bicep curls", "repetitions", "external", "dumbbell", "bicep-curl"),
+    (
+        "band-pull-aparts",
+        "Band pull-aparts",
+        "repetitions",
+        "external",
+        "resistance_band",
+        "band-pull-apart",
+    ),
+    ("deadlifts", "Deadlifts", "repetitions", "external", "barbell", "deadlift"),
+    ("plank", "Plank", "duration", "bodyweight", None, "plank"),
+    (
+        "hollow-body-hold",
+        "Hollow-body hold",
+        "duration",
+        "bodyweight",
+        None,
+        "hollow-body-hold",
+    ),
+)
+
+BACKUP_APP_ID = "monster-sets"
+BACKUP_FORMAT_VERSION = 1
+
+
+class DomainError(ValueError):
+    pass
+
+
+def normalize_name(value: str) -> tuple[str, str]:
+    display = " ".join(unicodedata.normalize("NFKC", value).strip().split())
+    if not display:
+        raise DomainError("Exercise name is required.")
+    if len(display) > 100:
+        raise DomainError("Exercise name must be at most 100 characters.")
+    return display, display.casefold()
+
+
+def parse_weight_grams(value: str | None, *, allow_blank: bool) -> int | None:
+    if value is None or not value.strip():
+        if allow_blank:
+            return None
+        raise DomainError("Weight is required for external resistance.")
+    try:
+        kilograms = Decimal(value.strip().replace(",", "."))
+    except InvalidOperation as exc:
+        raise DomainError("Weight must be a valid number.") from exc
+    if kilograms == 0:
+        return 0
+    if kilograms < 0:
+        raise DomainError("Weight cannot be negative.")
+    grams = int((kilograms * 1000).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    if grams <= 0:
+        raise DomainError("Weight is too small.")
+    return grams
+
+
+def format_weight(grams: int | None) -> str | None:
+    if grams is None:
+        return None
+    value = Decimal(grams) / Decimal(1000)
+    return format(value.normalize(), "f")
+
+
+class MonsterSetsDatabase:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.path = settings.database_path
+        self._backup_lock = threading.RLock()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.migrate()
+
+    @contextmanager
+    def connect(self, path: Path | None = None) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(path or self.path, timeout=5)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute(
+            "PRAGMA journal_mode = WAL" if path is None else "PRAGMA journal_mode = DELETE"
+        )
+        try:
+            yield connection
+        finally:
+            connection.close()
+
+    def migrate(self) -> None:
+        with self.connect() as connection:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS exercises (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    seed_key TEXT UNIQUE,
+                    name TEXT NOT NULL,
+                    normalized_name TEXT NOT NULL UNIQUE,
+                    measurement_type TEXT NOT NULL
+                        CHECK (measurement_type IN ('repetitions', 'duration')),
+                    default_resistance_kind TEXT NOT NULL
+                        CHECK (default_resistance_kind IN ('bodyweight', 'external')),
+                    default_equipment TEXT,
+                    default_custom_equipment TEXT,
+                    default_weight_grams INTEGER CHECK (default_weight_grams > 0),
+                    image_key TEXT,
+                    archived_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS day_exercises (
+                    entry_date TEXT NOT NULL,
+                    exercise_id INTEGER NOT NULL,
+                    display_order INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (entry_date, exercise_id),
+                    UNIQUE (entry_date, display_order),
+                    FOREIGN KEY (exercise_id) REFERENCES exercises(id) ON DELETE RESTRICT
+                );
+                CREATE TABLE IF NOT EXISTS exercise_sets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    exercise_id INTEGER NOT NULL,
+                    entry_date TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    repetitions INTEGER CHECK (repetitions > 0),
+                    duration_seconds INTEGER CHECK (duration_seconds > 0),
+                    resistance_kind TEXT NOT NULL
+                        CHECK (resistance_kind IN ('bodyweight', 'external')),
+                    weight_grams INTEGER CHECK (weight_grams > 0),
+                    equipment TEXT,
+                    custom_equipment TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK ((repetitions IS NOT NULL) != (duration_seconds IS NOT NULL)),
+                    FOREIGN KEY (exercise_id) REFERENCES exercises(id) ON DELETE RESTRICT
+                );
+                CREATE INDEX IF NOT EXISTS idx_sets_day_exercise_order
+                    ON exercise_sets(entry_date, exercise_id, occurred_at, created_at, id);
+                CREATE INDEX IF NOT EXISTS idx_sets_exercise_order
+                    ON exercise_sets(exercise_id, occurred_at, created_at, id);
+                CREATE INDEX IF NOT EXISTS idx_sets_day ON exercise_sets(entry_date);
+                CREATE TABLE IF NOT EXISTS backup_runs (
+                    category TEXT PRIMARY KEY,
+                    last_scheduled_date TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS backup_metadata (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    app_id TEXT NOT NULL,
+                    format_version INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    category TEXT NOT NULL
+                );
+                """
+            )
+            if (
+                connection.execute("SELECT 1 FROM schema_migrations WHERE version = 1").fetchone()
+                is None
+            ):
+                now = self._utc_now()
+                for seed_key, name, measurement, resistance, equipment, image_key in SEED_EXERCISES:
+                    display, normalized = normalize_name(name)
+                    connection.execute(
+                        """
+                        INSERT INTO exercises(
+                            seed_key, name, normalized_name, measurement_type,
+                            default_resistance_kind, default_equipment, image_key,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            seed_key,
+                            display,
+                            normalized,
+                            measurement,
+                            resistance,
+                            equipment,
+                            image_key,
+                            now,
+                            now,
+                        ),
+                    )
+                connection.execute("INSERT INTO schema_migrations(version) VALUES (1)")
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO backup_metadata(
+                    id, app_id, format_version, created_at, category
+                ) VALUES (1, ?, ?, ?, 'live')
+                """,
+                (BACKUP_APP_ID, BACKUP_FORMAT_VERSION, self._utc_now()),
+            )
+            connection.commit()
+
+    def _utc_now(self) -> str:
+        return datetime.now(UTC).isoformat(timespec="microseconds")
+
+    def now_local(self) -> datetime:
+        return datetime.now(self.settings.timezone)
+
+    def today(self) -> date:
+        return self.now_local().date()
+
+    def _parse_day(self, value: str) -> date:
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError as exc:
+            raise DomainError("Date must use YYYY-MM-DD.") from exc
+        if parsed > self.today():
+            raise DomainError("Future dates cannot contain exercise sets.")
+        return parsed
+
+    def _occurrence(self, day_value: str, time_value: str | None) -> str:
+        day = self._parse_day(day_value)
+        now = self.now_local()
+        if time_value is None:
+            local = (
+                now
+                if day == now.date()
+                else datetime.combine(day, now.timetz(), self.settings.timezone)
+            )
+        else:
+            if not re.fullmatch(r"\d{2}:\d{2}", time_value):
+                raise DomainError("Time must use HH:MM.")
+            try:
+                parsed_time = time.fromisoformat(time_value)
+            except ValueError as exc:
+                raise DomainError("Time must be valid.") from exc
+            local = datetime.combine(day, parsed_time, self.settings.timezone)
+        if local > now:
+            raise DomainError("Exercise sets cannot occur in the future.")
+        return local.astimezone(UTC).isoformat(timespec="microseconds")
+
+    def _local_time(self, occurred_at: str) -> str:
+        parsed = datetime.fromisoformat(occurred_at)
+        return parsed.astimezone(self.settings.timezone).strftime("%H:%M")
+
+    def _exercise_row(self, connection: sqlite3.Connection, exercise_id: int) -> sqlite3.Row:
+        row = connection.execute("SELECT * FROM exercises WHERE id = ?", (exercise_id,)).fetchone()
+        if row is None:
+            raise DomainError("Exercise not found.")
+        return row
+
+    def _validate_defaults(
+        self,
+        resistance_kind: str,
+        equipment: str | None,
+        custom_equipment: str | None,
+        weight_kg: str | None,
+    ) -> tuple[str | None, str | None, int | None]:
+        if resistance_kind == "bodyweight":
+            return None, None, None
+        if equipment not in EQUIPMENT:
+            raise DomainError("Choose equipment for external resistance.")
+        custom = " ".join((custom_equipment or "").split()) or None
+        if equipment == "other" and custom is None:
+            raise DomainError("Name the custom equipment.")
+        if equipment != "other":
+            custom = None
+        weight = parse_weight_grams(weight_kg, allow_blank=True)
+        if weight == 0:
+            return None, None, None
+        return equipment, custom, weight
+
+    def _validate_set(
+        self,
+        exercise: sqlite3.Row,
+        repetitions: int | None,
+        duration_minutes: int | None,
+        duration_seconds: int | None,
+        resistance_kind: str,
+        equipment: str | None,
+        custom_equipment: str | None,
+        weight_kg: str | None,
+    ) -> tuple[int | None, int | None, str, int | None, str | None, str | None]:
+        if exercise["measurement_type"] == "repetitions":
+            if duration_minutes is not None or duration_seconds is not None:
+                raise DomainError("A repetition exercise cannot contain a duration.")
+            if repetitions is None or repetitions <= 0:
+                raise DomainError("Repetitions must be a positive whole number.")
+            measured_reps, measured_duration = repetitions, None
+        else:
+            if repetitions is not None:
+                raise DomainError("A duration exercise cannot contain repetitions.")
+            minutes = duration_minutes or 0
+            seconds = duration_seconds or 0
+            if minutes < 0 or seconds < 0 or seconds > 59:
+                raise DomainError("Duration seconds must be between 0 and 59.")
+            total = minutes * 60 + seconds
+            if total <= 0 or total > 86400:
+                raise DomainError("Duration must be between 1 second and 24 hours.")
+            measured_reps, measured_duration = None, total
+
+        if resistance_kind == "bodyweight":
+            return measured_reps, measured_duration, "bodyweight", None, None, None
+        if equipment not in EQUIPMENT:
+            raise DomainError("Choose equipment for external resistance.")
+        custom = " ".join((custom_equipment or "").split()) or None
+        if equipment == "other" and custom is None:
+            raise DomainError("Name the custom equipment.")
+        if equipment != "other":
+            custom = None
+        weight = parse_weight_grams(weight_kg, allow_blank=False)
+        if weight == 0:
+            return measured_reps, measured_duration, "bodyweight", None, None, None
+        return measured_reps, measured_duration, "external", weight, equipment, custom
+
+    def _serialize_exercise(self, row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "measurementType": row["measurement_type"],
+            "defaultResistanceKind": row["default_resistance_kind"],
+            "defaultEquipment": row["default_equipment"],
+            "defaultCustomEquipment": row["default_custom_equipment"],
+            "defaultWeightKg": format_weight(row["default_weight_grams"]),
+            "imageKey": row["image_key"],
+            "archivedAt": row["archived_at"],
+            "hasHistory": bool(row["has_history"]) if "has_history" in row else False,
+        }
+
+    def _serialize_set(self, row: sqlite3.Row) -> dict:
+        duration = row["duration_seconds"]
+        return {
+            "id": row["id"],
+            "exerciseId": row["exercise_id"],
+            "date": row["entry_date"],
+            "occurredAt": row["occurred_at"],
+            "time": self._local_time(row["occurred_at"]),
+            "repetitions": row["repetitions"],
+            "durationMinutes": None if duration is None else duration // 60,
+            "durationSeconds": None if duration is None else duration % 60,
+            "resistanceKind": row["resistance_kind"],
+            "weightKg": format_weight(row["weight_grams"]),
+            "equipment": row["equipment"],
+            "customEquipment": row["custom_equipment"],
+            "createdAt": row["created_at"],
+        }
+
+    def list_exercises(self, status: str, query: str, measurement_type: str | None) -> list[dict]:
+        if status not in {"active", "archived", "all"}:
+            raise DomainError("Invalid exercise status.")
+        clauses: list[str] = []
+        params: list[str] = []
+        if status == "active":
+            clauses.append("archived_at IS NULL")
+        elif status == "archived":
+            clauses.append("archived_at IS NOT NULL")
+        if query.strip():
+            clauses.append("normalized_name LIKE ?")
+            params.append(f"%{normalize_name(query)[1]}%")
+        if measurement_type:
+            if measurement_type not in {"repetitions", "duration"}:
+                raise DomainError("Invalid measurement type.")
+            clauses.append("measurement_type = ?")
+            params.append(measurement_type)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT e.*, EXISTS(
+                    SELECT 1 FROM exercise_sets s WHERE s.exercise_id = e.id
+                ) AS has_history
+                FROM exercises e {where} ORDER BY normalized_name
+                """,
+                params,
+            ).fetchall()
+        return [self._serialize_exercise(row) for row in rows]
+
+    def exercise(self, exercise_id: int) -> dict:
+        with self.connect() as connection:
+            self._exercise_row(connection, exercise_id)
+            row = connection.execute(
+                """
+                SELECT e.*, EXISTS(
+                    SELECT 1 FROM exercise_sets s WHERE s.exercise_id = e.id
+                ) AS has_history FROM exercises e WHERE e.id = ?
+                """,
+                (exercise_id,),
+            ).fetchone()
+            return self._serialize_exercise(row)
+
+    def create_exercise(self, payload) -> dict:
+        name, normalized = normalize_name(payload.name)
+        equipment, custom, weight = self._validate_defaults(
+            payload.defaultResistanceKind,
+            payload.defaultEquipment,
+            payload.defaultCustomEquipment,
+            payload.defaultWeightKg,
+        )
+        resistance = "bodyweight" if equipment is None else "external"
+        now = self._utc_now()
+        try:
+            with self.connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO exercises(
+                        name, normalized_name, measurement_type,
+                        default_resistance_kind, default_equipment,
+                        default_custom_equipment, default_weight_grams, image_key,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        name,
+                        normalized,
+                        payload.measurementType,
+                        resistance,
+                        equipment,
+                        custom,
+                        weight,
+                        payload.imageKey,
+                        now,
+                        now,
+                    ),
+                )
+                connection.commit()
+                row = self._exercise_row(connection, cursor.lastrowid)
+                return self._serialize_exercise(row)
+        except sqlite3.IntegrityError as exc:
+            raise DomainError("An exercise with this name already exists.") from exc
+
+    def update_exercise(self, exercise_id: int, payload) -> dict:
+        name, normalized = normalize_name(payload.name)
+        equipment, custom, weight = self._validate_defaults(
+            payload.defaultResistanceKind,
+            payload.defaultEquipment,
+            payload.defaultCustomEquipment,
+            payload.defaultWeightKg,
+        )
+        resistance = "bodyweight" if equipment is None else "external"
+        try:
+            with self.connect() as connection:
+                self._exercise_row(connection, exercise_id)
+                connection.execute(
+                    """
+                    UPDATE exercises SET name = ?, normalized_name = ?,
+                        default_resistance_kind = ?, default_equipment = ?,
+                        default_custom_equipment = ?, default_weight_grams = ?,
+                        image_key = ?, updated_at = ? WHERE id = ?
+                    """,
+                    (
+                        name,
+                        normalized,
+                        resistance,
+                        equipment,
+                        custom,
+                        weight,
+                        payload.imageKey,
+                        self._utc_now(),
+                        exercise_id,
+                    ),
+                )
+                connection.commit()
+                return self._serialize_exercise(self._exercise_row(connection, exercise_id))
+        except sqlite3.IntegrityError as exc:
+            raise DomainError("An exercise with this name already exists.") from exc
+
+    def archive_exercise(self, exercise_id: int) -> dict:
+        with self.connect() as connection:
+            row = self._exercise_row(connection, exercise_id)
+            if row["archived_at"] is None:
+                connection.execute(
+                    "UPDATE exercises SET archived_at = ?, updated_at = ? WHERE id = ?",
+                    (self._utc_now(), self._utc_now(), exercise_id),
+                )
+                connection.commit()
+            return self._serialize_exercise(self._exercise_row(connection, exercise_id))
+
+    def restore_exercise(self, exercise_id: int) -> dict:
+        with self.connect() as connection:
+            self._exercise_row(connection, exercise_id)
+            connection.execute(
+                "UPDATE exercises SET archived_at = NULL, updated_at = ? WHERE id = ?",
+                (self._utc_now(), exercise_id),
+            )
+            connection.commit()
+            return self._serialize_exercise(self._exercise_row(connection, exercise_id))
+
+    def delete_exercise(self, exercise_id: int, confirmation: str) -> None:
+        if confirmation != "DELETE":
+            raise DomainError("Type DELETE to permanently delete this exercise.")
+        with self.connect() as connection:
+            self._exercise_row(connection, exercise_id)
+            if connection.execute(
+                "SELECT 1 FROM exercise_sets WHERE exercise_id = ? LIMIT 1", (exercise_id,)
+            ).fetchone():
+                raise DomainError("Exercises with history cannot be deleted; archive it instead.")
+            connection.execute("DELETE FROM exercises WHERE id = ?", (exercise_id,))
+            connection.commit()
+
+    def _set_rows(
+        self, connection: sqlite3.Connection, day: str, exercise_id: int
+    ) -> list[sqlite3.Row]:
+        return connection.execute(
+            """
+            SELECT * FROM exercise_sets
+            WHERE entry_date = ? AND exercise_id = ?
+            ORDER BY occurred_at, created_at, id
+            """,
+            (day, exercise_id),
+        ).fetchall()
+
+    def day(self, day_value: str) -> dict:
+        self._parse_day(day_value)
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT e.*, d.display_order
+                FROM day_exercises d JOIN exercises e ON e.id = d.exercise_id
+                WHERE d.entry_date = ? ORDER BY d.display_order
+                """,
+                (day_value,),
+            ).fetchall()
+            sections = []
+            for exercise in rows:
+                sets = [
+                    self._serialize_set(row)
+                    for row in self._set_rows(connection, day_value, exercise["id"])
+                ]
+                total = sum(
+                    (item["repetitions"] or 0)
+                    if exercise["measurement_type"] == "repetitions"
+                    else (item["durationMinutes"] or 0) * 60 + (item["durationSeconds"] or 0)
+                    for item in sets
+                )
+                sections.append(
+                    {
+                        "exercise": self._serialize_exercise(exercise),
+                        "displayOrder": exercise["display_order"],
+                        "total": total,
+                        "sets": sets,
+                    }
+                )
+        return {"date": day_value, "sections": sections}
+
+    def calendar(self, month: str) -> dict:
+        if not re.fullmatch(r"\d{4}-\d{2}", month):
+            raise DomainError("Month must use YYYY-MM.")
+        try:
+            first = date.fromisoformat(f"{month}-01")
+        except ValueError as exc:
+            raise DomainError("Month must be valid.") from exc
+        next_month = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT entry_date FROM exercise_sets
+                WHERE entry_date >= ? AND entry_date < ? ORDER BY entry_date
+                """,
+                (first.isoformat(), next_month.isoformat()),
+            ).fetchall()
+        return {"month": month, "activeDates": [row["entry_date"] for row in rows]}
+
+    def prefill(self, exercise_id: int, day_value: str, time_value: str | None) -> dict:
+        before = self._occurrence(day_value, time_value)
+        with self.connect() as connection:
+            exercise = self._exercise_row(connection, exercise_id)
+            row = connection.execute(
+                """
+                SELECT * FROM exercise_sets
+                WHERE exercise_id = ? AND occurred_at < ?
+                ORDER BY occurred_at DESC, created_at DESC, id DESC LIMIT 1
+                """,
+                (exercise_id, before),
+            ).fetchone()
+            if row:
+                result = self._serialize_set(row)
+                result["source"] = "previous"
+                return result
+            return {
+                "source": "defaults",
+                "repetitions": None,
+                "durationMinutes": None,
+                "durationSeconds": None,
+                "resistanceKind": exercise["default_resistance_kind"],
+                "weightKg": format_weight(exercise["default_weight_grams"]),
+                "equipment": exercise["default_equipment"],
+                "customEquipment": exercise["default_custom_equipment"],
+            }
+
+    def add_set(self, exercise_id: int, day_value: str, payload) -> dict:
+        occurred_at = self._occurrence(day_value, payload.time)
+        now = self._utc_now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            exercise = self._exercise_row(connection, exercise_id)
+            if exercise["archived_at"] is not None:
+                raise DomainError("Restore this exercise before adding a set.")
+            reps, duration, resistance, weight, equipment, custom = self._validate_set(
+                exercise,
+                payload.repetitions,
+                payload.durationMinutes,
+                payload.durationSeconds,
+                payload.resistanceKind,
+                payload.equipment,
+                payload.customEquipment,
+                payload.weightKg,
+            )
+            if (
+                connection.execute(
+                    "SELECT 1 FROM day_exercises WHERE entry_date = ? AND exercise_id = ?",
+                    (day_value, exercise_id),
+                ).fetchone()
+                is None
+            ):
+                display_order = connection.execute(
+                    "SELECT COALESCE(MAX(display_order), 0) + 1 FROM day_exercises WHERE entry_date = ?",
+                    (day_value,),
+                ).fetchone()[0]
+                connection.execute(
+                    "INSERT INTO day_exercises VALUES (?, ?, ?, ?)",
+                    (day_value, exercise_id, display_order, now),
+                )
+            cursor = connection.execute(
+                """
+                INSERT INTO exercise_sets(
+                    exercise_id, entry_date, occurred_at, repetitions,
+                    duration_seconds, resistance_kind, weight_grams, equipment,
+                    custom_equipment, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    exercise_id,
+                    day_value,
+                    occurred_at,
+                    reps,
+                    duration,
+                    resistance,
+                    weight,
+                    equipment,
+                    custom,
+                    now,
+                    now,
+                ),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM exercise_sets WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+            return self._serialize_set(row)
+
+    def update_set(self, set_id: int, payload) -> dict:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT * FROM exercise_sets WHERE id = ?", (set_id,)
+            ).fetchone()
+            if current is None:
+                raise DomainError("Set not found.")
+            exercise = self._exercise_row(connection, current["exercise_id"])
+            occurred_at = (
+                current["occurred_at"]
+                if payload.time is None
+                else self._occurrence(current["entry_date"], payload.time)
+            )
+            reps, duration, resistance, weight, equipment, custom = self._validate_set(
+                exercise,
+                payload.repetitions,
+                payload.durationMinutes,
+                payload.durationSeconds,
+                payload.resistanceKind,
+                payload.equipment,
+                payload.customEquipment,
+                payload.weightKg,
+            )
+            connection.execute(
+                """
+                UPDATE exercise_sets SET occurred_at = ?, repetitions = ?,
+                    duration_seconds = ?, resistance_kind = ?, weight_grams = ?,
+                    equipment = ?, custom_equipment = ?, updated_at = ? WHERE id = ?
+                """,
+                (
+                    occurred_at,
+                    reps,
+                    duration,
+                    resistance,
+                    weight,
+                    equipment,
+                    custom,
+                    self._utc_now(),
+                    set_id,
+                ),
+            )
+            connection.commit()
+            return self._serialize_set(
+                connection.execute("SELECT * FROM exercise_sets WHERE id = ?", (set_id,)).fetchone()
+            )
+
+    def delete_set(self, set_id: int) -> None:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM exercise_sets WHERE id = ?", (set_id,)
+            ).fetchone()
+            if row is None:
+                raise DomainError("Set not found.")
+            connection.execute("DELETE FROM exercise_sets WHERE id = ?", (set_id,))
+            if (
+                connection.execute(
+                    "SELECT 1 FROM exercise_sets WHERE entry_date = ? AND exercise_id = ? LIMIT 1",
+                    (row["entry_date"], row["exercise_id"]),
+                ).fetchone()
+                is None
+            ):
+                connection.execute(
+                    "DELETE FROM day_exercises WHERE entry_date = ? AND exercise_id = ?",
+                    (row["entry_date"], row["exercise_id"]),
+                )
+            connection.commit()
+
+    def create_backup(self, category: str) -> dict:
+        if category not in {"daily", "weekly", "on-demand"}:
+            raise DomainError("Invalid backup category.")
+        with self._backup_lock:
+            directory = self.settings.backup_directory
+            directory.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+            path = directory / f"{category}-{stamp}.sqlite3"
+            with self.connect() as source:
+                target = sqlite3.connect(path)
+                try:
+                    source.backup(target)
+                    target.execute(
+                        """
+                        INSERT INTO backup_metadata(id, app_id, format_version, created_at, category)
+                        VALUES (1, ?, ?, ?, ?)
+                        ON CONFLICT(id) DO UPDATE SET app_id=excluded.app_id,
+                            format_version=excluded.format_version,
+                            created_at=excluded.created_at, category=excluded.category
+                        """,
+                        (BACKUP_APP_ID, BACKUP_FORMAT_VERSION, self._utc_now(), category),
+                    )
+                    target.commit()
+                    if target.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                        raise DomainError("Backup integrity check failed.")
+                finally:
+                    target.close()
+            if category in {"daily", "weekly"}:
+                self._prune(category, 5)
+            return self._backup_info(path)
+
+    def _prune(self, category: str, retention: int) -> None:
+        files = sorted(
+            self.settings.backup_directory.glob(f"{category}-*.sqlite3"),
+            key=lambda item: item.stat().st_mtime_ns,
+            reverse=True,
+        )
+        for path in files[retention:]:
+            path.unlink()
+
+    def _backup_info(self, path: Path) -> dict:
+        stat = path.stat()
+        category = path.name.split("-20", 1)[0]
+        return {
+            "id": path.name,
+            "category": category,
+            "createdAt": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
+            "sizeBytes": stat.st_size,
+        }
+
+    def list_backups(self) -> list[dict]:
+        directory = self.settings.backup_directory
+        if not directory.exists():
+            return []
+        return [
+            self._backup_info(path)
+            for path in sorted(
+                directory.glob("*.sqlite3"), key=lambda item: item.stat().st_mtime_ns, reverse=True
+            )
+        ]
+
+    def backup_path(self, backup_id: str) -> Path:
+        if Path(backup_id).name != backup_id:
+            raise DomainError("Invalid backup identifier.")
+        path = self.settings.backup_directory / backup_id
+        if not path.is_file():
+            raise DomainError("Backup not found.")
+        return path
+
+    def delete_backup(self, backup_id: str) -> None:
+        self.backup_path(backup_id).unlink()
+
+    def run_scheduled_backups(self) -> None:
+        today = self.today()
+        daily_date = today - timedelta(days=1)
+        sunday_offset = (today.weekday() + 1) % 7
+        weekly_date = today - timedelta(days=sunday_offset)
+        with self.connect() as connection:
+            runs = {
+                row["category"]: row["last_scheduled_date"]
+                for row in connection.execute("SELECT * FROM backup_runs")
+            }
+        for category, logical_date in (("daily", daily_date), ("weekly", weekly_date)):
+            if runs.get(category) == logical_date.isoformat():
+                continue
+            self.create_backup(category)
+            with self.connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO backup_runs(category, last_scheduled_date) VALUES (?, ?)
+                    ON CONFLICT(category) DO UPDATE SET last_scheduled_date=excluded.last_scheduled_date
+                    """,
+                    (category, logical_date.isoformat()),
+                )
+                connection.commit()

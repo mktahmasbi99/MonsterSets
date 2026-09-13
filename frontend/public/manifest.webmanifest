@@ -1,0 +1,16 @@
+{
+  "name": "MonsterSets",
+  "short_name": "MonsterSets",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f2f8",
+  "theme_color": "#6d4aff",
+  "icons": [
+    {
+      "src": "/monster-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

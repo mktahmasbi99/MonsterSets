@@ -1,0 +1,15 @@
+.DS_Store
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+*.egg-info/
+*.tsbuildinfo
+data/
+frontend/node_modules/
+frontend/dist/
+frontend/public/exercise-assets/
+frontend/test-results/
+frontend/playwright-report/
