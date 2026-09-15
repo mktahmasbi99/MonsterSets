@@ -3,8 +3,8 @@
   "short_name": "Rostam",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f4f2f8",
-  "theme_color": "#6d4aff",
+  "background_color": "#eee4d2",
+  "theme_color": "#173452",
   "icons": [
     {
       "src": "/rostam-logo.png",
