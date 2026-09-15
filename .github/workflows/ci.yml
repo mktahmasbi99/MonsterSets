@@ -52,7 +52,7 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ghcr.io/${{ github.repository_owner }}/monstersets
+          images: ghcr.io/${{ github.repository_owner }}/rostam
           tags: |
             type=raw,value=latest
             type=sha

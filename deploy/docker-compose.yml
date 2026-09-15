@@ -1,6 +1,6 @@
 services:
   monster-sets:
-    image: ghcr.io/mktahmasbi99/monstersets:latest
+    image: ghcr.io/mktahmasbi99/rostam:latest
     container_name: monster-sets
     restart: unless-stopped
     ports:
