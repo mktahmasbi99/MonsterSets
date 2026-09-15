@@ -29,7 +29,7 @@ cd frontend
 npm ci
 npm run build
 cd ..
-TZ=Europe/Warsaw MONSTER_SETS_DB=./data/monster_sets.sqlite3 \
+TZ=Europe/Warsaw ROSTAM_DB=./data/rostam.sqlite3 \
   .venv/bin/uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
 ```
 
@@ -62,7 +62,7 @@ Keep the service private behind Tailscale or another trusted network boundary; R
 
 ### Manual restore
 
-Stop the container, make a safety copy of `deploy/data`, replace `monster_sets.sqlite3` with the chosen downloaded backup, then start the container again. Do not replace a live SQLite database.
+Stop the container, make a safety copy of `deploy/data`, replace `rostam.sqlite3` with the chosen downloaded backup, then start the container again. Do not replace a live SQLite database.
 
 ## Data conventions
 

@@ -7,6 +7,6 @@ services:
       - "8000:8000"
     environment:
       TZ: ${TZ:-Europe/Warsaw}
-      MONSTER_SETS_DB: /data/monster_sets.sqlite3
+      ROSTAM_DB: /data/rostam.sqlite3
     volumes:
       - ./data:/data

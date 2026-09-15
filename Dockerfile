@@ -9,7 +9,7 @@ FROM python:3.13-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     TZ=Europe/Warsaw \
-    MONSTER_SETS_DB=/data/monster_sets.sqlite3
+    ROSTAM_DB=/data/rostam.sqlite3
 WORKDIR /app
 COPY backend/pyproject.toml ./backend/
 COPY backend/app ./backend/app
