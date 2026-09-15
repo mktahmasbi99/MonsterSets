@@ -2,6 +2,10 @@
 
 MonsterSets is a private, observational daily exercise ledger. Record a set when it happens—or reconstruct the day later—without starting a workout session, chasing a goal, or carrying unfinished work into tomorrow.
 
+## Why Rostam?
+
+Rostam is named after the legendary hero of Ferdowsi’s *Shahnameh* (*Book of Kings*).
+
 ## What V1 does
 
 - Logs repetition- and duration-based sets against a server-authoritative day and time.
