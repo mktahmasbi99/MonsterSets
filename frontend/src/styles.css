@@ -58,7 +58,7 @@ svg { width: 21px; height: 21px; stroke-width: 2.25; }
 .daily-total { color: var(--accent-dark); font-size: .92rem; }
 .exercise-image { flex: 0 0 auto; width: 52px; height: 52px; border-radius: 15px; background: linear-gradient(145deg, #f4f0ff, #ece6ff); overflow: hidden; display: grid; place-items: center; }
 .exercise-image.large { width: 68px; height: 68px; border-radius: 19px; }
-.exercise-image img { width: 100%; height: 100%; object-fit: contain; mix-blend-mode: multiply; }
+.exercise-image img { width: 100%; height: 100%; object-fit: contain; filter: invert(1); }
 .image-fallback { background: linear-gradient(145deg, #6d4aff, #9f80ff); color: white; font-size: 1.35rem; font-weight: 900; }
 
 .set-list { border-top: 1px solid var(--line); }
@@ -171,7 +171,7 @@ input, select { width: 100%; min-height: 46px; padding: 0 12px; border: 1px soli
   body { background: radial-gradient(circle at 90% 0%, #302550 0, transparent 30rem), #17141d; }
   input, select, .segmented button.selected, .modal-sheet, .picture-picker { background: #211d28; color: #f5f1ff; border-color: var(--line); }
   .set-draft { background: #201c27; }
-  .exercise-image img { mix-blend-mode: screen; filter: invert(1); }
+  .exercise-image img { filter: none; }
   .bottom-nav { background: rgba(29, 25, 35, .93); }
   .empty-state h2 { color: #f5f1ff; }
   .error-panel { background: #401f29; border-color: #6b2a3a; }
