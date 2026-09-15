@@ -1,8 +1,8 @@
-# Exercise Tracker V1 implementation plan
+# Rostam V1 implementation plan
 
 ## 1. Product definition
 
-Exercise Tracker is a private, single-user daily exercise ledger. Its unit of
+Rostam is a private, single-user daily exercise ledger. Its unit of
 activity is a set and its container is a calendar day. It does not create or
 time workout sessions.
 

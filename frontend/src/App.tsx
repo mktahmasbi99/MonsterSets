@@ -24,7 +24,7 @@ export default function App() {
       });
       setError("");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not reach MonsterSets.");
+      setError(caught instanceof Error ? caught.message : "Could not reach Rostam.");
     }
   }, [selectedDay]);
 
@@ -38,10 +38,10 @@ export default function App() {
     return () => { window.removeEventListener("focus", refresh); window.removeEventListener("online", refresh); document.removeEventListener("visibilitychange", refresh); window.clearInterval(timer); };
   }, [loadConfig]);
 
-  if (!config) return <div className="startup"><div className="monster-logo">M</div><h1>MonsterSets</h1>{error ? <><p className="error">{error}</p><button onClick={() => void loadConfig()}>Retry</button></> : <p>Loading your ledger…</p>}</div>;
+  if (!config) return <div className="startup"><img className="app-logo startup-logo" src="/rostam-logo.png" alt="" /><h1>Rostam</h1>{error ? <><p className="error">{error}</p><button onClick={() => void loadConfig()}>Retry</button></> : <p>Loading your ledger…</p>}</div>;
 
   return <div className="app-shell">
-    <div className="brand"><span className="brand-mark">M</span><strong>MonsterSets</strong></div>
+    <div className="brand"><img className="app-logo brand-logo" src="/rostam-logo.png" alt="" /><strong>Rostam</strong></div>
     <div className="content">
       {tab === "today" && <DayPage day={selectedDay} today={config.today} onDayChange={setSelectedDay} />}
       {tab === "calendar" && <CalendarPage today={config.today} onChooseDay={(day) => { setSelectedDay(day); setTab("today"); }} />}
@@ -56,4 +56,3 @@ export default function App() {
     </nav>
   </div>;
 }
-

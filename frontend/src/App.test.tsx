@@ -14,7 +14,7 @@ vi.mock("./lib/api", () => ({
   },
 }));
 
-describe("MonsterSets shell", () => {
+describe("Rostam shell", () => {
   beforeEach(() => {
     vi.mocked(api.config).mockResolvedValue({ today: "2026-09-13", timezone: "Europe/Warsaw", version: "1.0.0" });
     vi.mocked(api.day).mockResolvedValue({ date: "2026-09-13", sections: [] });

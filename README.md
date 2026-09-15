@@ -1,6 +1,6 @@
-# MonsterSets
+# Rostam
 
-MonsterSets is a private, observational daily exercise ledger. Record a set when it happens—or reconstruct the day later—without starting a workout session, chasing a goal, or carrying unfinished work into tomorrow.
+Rostam is a private, observational daily exercise ledger. Record a set when it happens—or reconstruct the day later—without starting a workout session, chasing a goal, or carrying unfinished work into tomorrow.
 
 ## Why Rostam?
 
@@ -58,7 +58,7 @@ docker compose pull
 docker compose up -d
 ```
 
-Keep the service private behind Tailscale or another trusted network boundary; MonsterSets intentionally has no authentication in V1.
+Keep the service private behind Tailscale or another trusted network boundary; Rostam intentionally has no authentication in V1.
 
 ### Manual restore
 
@@ -75,4 +75,4 @@ Stop the container, make a safety copy of `deploy/data`, replace `monster_sets.s
 
 ## Artwork and licenses
 
-MonsterSets is MIT licensed. Exercise artwork comes from Bryl Lim's Workout Guide and is CC BY-SA 4.0; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for full attribution.
+Rostam is MIT licensed. Exercise artwork comes from Bryl Lim's Workout Guide and is CC BY-SA 4.0; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for full attribution.

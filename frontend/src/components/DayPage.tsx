@@ -82,7 +82,7 @@ export function DayPage({ day, today, onDayChange }: Props) {
 
       {error && <div className="error-panel" role="alert"><p>{error}</p><button onClick={() => void load()}>Retry</button></div>}
       {loading && <p className="loading">Loading sets…</p>}
-      {!loading && !error && data.sections.length === 0 && !pendingExercise && <div className="empty-state"><div className="monster-mark">M</div><h2>No sets recorded</h2><p>Add the first exercise when movement finds you today.</p><button className="primary" onClick={() => setPickerOpen(true)}><Plus />Add exercise</button></div>}
+      {!loading && !error && data.sections.length === 0 && !pendingExercise && <div className="empty-state"><img className="app-logo empty-logo" src="/rostam-logo.png" alt="" /><h2>No sets recorded</h2><p>Add the first exercise when movement finds you today.</p><button className="primary" onClick={() => setPickerOpen(true)}><Plus />Add exercise</button></div>}
 
       <div className="exercise-sections">
         {data.sections.map((section) => <section className="exercise-card" key={section.exercise.id}>
@@ -106,4 +106,3 @@ export function DayPage({ day, today, onDayChange }: Props) {
     </main>
   );
 }
-

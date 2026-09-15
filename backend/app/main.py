@@ -41,7 +41,7 @@ async def lifespan(_: FastAPI):
             await task
 
 
-app = FastAPI(title="MonsterSets API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Rostam API", version="1.0.0", lifespan=lifespan)
 
 
 @app.middleware("http")
